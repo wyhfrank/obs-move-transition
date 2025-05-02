@@ -3,6 +3,11 @@
 #include <obs-module.h>
 #include <stdio.h>
 #include <util/dstr.h>
+#include "obs-websocket-api.h"
+#include <util/darray.h>
+
+// Global list to track registered move sources for WebSocket control
+DARRAY(struct move_source_info *) websocket_registered_sources;
 
 struct move_source_info {
 	struct move_filter move_filter;
@@ -42,6 +47,10 @@ struct move_source_info {
 	float audio_fade_to;
 	long long mute_action;
 	bool midpoint;
+
+	// WebSocket control
+	bool enable_websocket_control;
+	char *websocket_request_type;
 };
 
 void move_source_scene_remove(void *data, calldata_t *call_data);
@@ -456,9 +465,32 @@ static void obs_data_set_sign(obs_data_t *settings, const char *name, const char
 	}
 }
 
+static void move_source_register_websocket(struct move_source_info *move_source)
+{
+	if (move_source && move_source->enable_websocket_control) {
+		da_push_back(websocket_registered_sources, &move_source);
+		blog(LOG_DEBUG, "Registered `MoveSceneItemTransform` request with obs-websocket for %s", move_source->source_name);
+	}
+}
+
+static void move_source_unregister_websocket(struct move_source_info *move_source)
+{
+	if (move_source) {
+		size_t idx;
+		for (idx = 0; idx < websocket_registered_sources.num; idx++) {
+			if (websocket_registered_sources.array[idx] == move_source) {
+				da_erase(websocket_registered_sources, idx);
+				break;
+			}
+		}
+		blog(LOG_DEBUG, "Unregistered `MoveSceneItemTransform` request with obs-websocket for %s", move_source->source_name);
+	}
+}
+
 void move_source_update(void *data, obs_data_t *settings)
 {
 	struct move_source_info *move_source = data;
+	bool old_enabled_websocket = move_source->enable_websocket_control;
 
 	const char *source_name = obs_data_get_string(settings, S_SOURCE);
 	if (!move_source->source_name || strcmp(move_source->source_name, source_name) != 0) {
@@ -517,6 +549,25 @@ void move_source_update(void *data, obs_data_t *settings)
 	move_source->mute_action = obs_data_get_int(settings, S_MUTE_ACTION);
 	move_source->audio_fade = obs_data_get_bool(settings, S_AUDIO_FADE);
 	move_source->audio_fade_to = (float)obs_data_get_double(settings, S_AUDIO_FADE_PERCENT) / 100.0f;
+
+
+	// Read WebSocket settings
+	move_source->enable_websocket_control = obs_data_get_bool(settings, S_WEBSOCKET_CONTROL_ENABLE);
+
+	bool websocket_changed = false;
+	if (move_source->enable_websocket_control != old_enabled_websocket) {
+		websocket_changed = true;
+	}
+
+	if (websocket_changed) {
+		// Unregister old request if type or enabled status changed
+		if (old_enabled_websocket && !move_source->enable_websocket_control) {
+			move_source_unregister_websocket(move_source);
+		} else if (!old_enabled_websocket && move_source->enable_websocket_control) {
+			move_source_register_websocket(move_source);
+		}
+	}
+
 	if (move_source->move_filter.start_trigger == START_TRIGGER_LOAD) {
 		move_source_start(move_source);
 	}
@@ -617,6 +668,13 @@ static void *move_source_create(obs_data_t *settings, obs_source_t *source)
 	obs_source_update(source, settings);
 	signal_handler_connect(obs_get_signal_handler(), "source_rename", move_source_source_rename, move_source);
 
+	// Initialize WebSocket array if not already done
+	static bool websocket_initialized = false;
+	if (!websocket_initialized) {
+		da_init(websocket_registered_sources);
+		websocket_initialized = true;
+	}
+
 	return move_source;
 }
 
@@ -653,10 +711,21 @@ static void move_source_destroy(void *data)
 		}
 		obs_source_release(source);
 	}
+
+	// Unregister from WebSocket if needed
+	if (move_source->enable_websocket_control) {
+		move_source_unregister_websocket(move_source);
+	}
+
 	move_source->scene_item = NULL;
 	move_filter_destroy(&move_source->move_filter);
 	bfree(move_source->source_name);
 	bfree(move_source);
+
+	// Clean up WebSocket resources when last source is destroyed
+	if (websocket_registered_sources.num == 0) {
+		da_free(websocket_registered_sources);
+	}
 }
 
 static void obs_data_set_vec2_sign(obs_data_t *data, const char *name, const struct vec2 *val, char x_sign, char y_sign)
@@ -1098,6 +1167,12 @@ static obs_properties_t *move_source_properties(void *data)
 	obs_properties_add_button(group, "move_source_start", obs_module_text("Start"), move_source_start_button);
 
 	p = obs_properties_add_group(ppts, S_ACTIONS, obs_module_text("Actions"), OBS_GROUP_NORMAL, group);
+
+	// WebSocket Control Group
+	group = obs_properties_create();
+	obs_properties_add_bool(group, S_WEBSOCKET_CONTROL_ENABLE, obs_module_text("EnableWebSocketControl"));
+	p = obs_properties_add_group(ppts, S_WEBSOCKET_CONTROL, obs_module_text("WebSocketControl"), OBS_GROUP_CHECKABLE | OBS_GROUP_NORMAL, group);
+
 	obs_properties_add_text(ppts, "plugin_info", PLUGIN_INFO, OBS_TEXT_INFO);
 	return ppts;
 }
@@ -1110,6 +1185,7 @@ void move_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, S_EASING_MATCH, EASE_IN_OUT);
 	obs_data_set_default_int(settings, S_EASING_FUNCTION_MATCH, EASING_CUBIC);
 	obs_data_set_default_double(settings, S_CURVE_MATCH, 0.0);
+	obs_data_set_default_bool(settings, S_WEBSOCKET_CONTROL_ENABLE, true);
 }
 
 void move_source_video_render(void *data, gs_effect_t *effect)
@@ -1270,6 +1346,68 @@ void move_source_tick(void *data, float seconds)
 	if (!move_source->move_filter.moving) {
 		move_source_ended(move_source);
 	}
+}
+
+// WebSocket request callback
+void move_source_websocket_request_cb(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	const char *transform_text = obs_data_get_string(request_data, "transformText");
+	const char *source_name = obs_data_get_string(request_data, "sourceName");
+	const char *scene_name = obs_data_get_string(request_data, "sceneName");
+
+	obs_scene_t *scene = obs_get_scene_by_name(scene_name);
+	if (!scene) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Scene not found");
+		return;
+	}
+
+	obs_sceneitem_t *scene_item = obs_scene_find_source(scene, source_name);
+	if (!scene_item) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Scene item not found");
+		return;
+	}
+
+	// Look for the source in the list of registered sources
+	struct move_source_info *move_source = NULL;
+	for (size_t idx = 0; idx < websocket_registered_sources.num; idx++) {
+		struct move_source_info *move_source_tmp = websocket_registered_sources.array[idx];
+		if (move_source_tmp->scene_item == scene_item) {
+			move_source = move_source_tmp;
+			break;
+		}
+	}
+
+	if (!move_source) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Scene item exists but is not registered for websocket events");
+		return;
+	}
+
+	if (!transform_text || !strlen(transform_text)) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Missing 'transformText' string in request data");
+		return;
+	}
+
+	obs_data_t *settings = obs_source_get_settings(move_source->move_filter.source);
+	if (!settings) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Failed to get filter settings");
+		return;
+	}
+
+	// Apply the settings
+	obs_data_set_string(settings, S_TRANSFORM_TEXT, transform_text);
+	move_source_transform_text_changed(move_source, NULL, NULL, settings);
+
+	// Trigger the start event
+	move_source_start(move_source);
+
+	obs_data_release(settings);
+	obs_scene_release(scene);
+	obs_data_set_bool(response_data, "success", true);
 }
 
 struct obs_source_info move_source_filter = {

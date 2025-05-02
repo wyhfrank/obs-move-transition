@@ -3297,6 +3297,8 @@ obs_websocket_vendor vendor = NULL;
 void obs_module_post_load()
 {
 	vendor = obs_websocket_register_vendor("move");
+	if (!obs_websocket_vendor_register_request(vendor, "MoveSceneItemTransform", move_source_websocket_request_cb, NULL))
+		blog(LOG_ERROR, "Failed to register `MoveSceneItemTransform` request with obs-websocket.");
 }
 
 void obs_module_unload()

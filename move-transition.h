@@ -128,6 +128,9 @@
 #define S_ENABLED_MATCH_MOVING "enabled_match_moving"
 #define S_MATCH_SOURCE "match_source"
 
+#define S_WEBSOCKET_CONTROL_ENABLE "websocket_control_enable"
+#define S_WEBSOCKET_CONTROL "websocket_control"
+
 #define NO_OVERRIDE (-1)
 
 #define ZOOM_NO 0
@@ -292,3 +295,5 @@ void move_filter_hide(void *data);
 void prop_list_add_easings(obs_property_t *p);
 void prop_list_add_easing_functions(obs_property_t *p);
 void prop_list_add_move_source_filter(obs_source_t *parent, obs_source_t *child, void *data);
+
+void move_source_websocket_request_cb(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
