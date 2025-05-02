@@ -1355,22 +1355,27 @@ void move_source_websocket_request_cb(obs_data_t *request_data, obs_data_t *resp
 	const char *source_name = obs_data_get_string(request_data, "sourceName");
 	const char *scene_name = obs_data_get_string(request_data, "sceneName");
 
-	obs_scene_t *scene = obs_get_scene_by_name(scene_name);
+	obs_scene_t *scene = NULL;
+	obs_sceneitem_t *scene_item = NULL;
+	obs_data_t *settings = NULL;
+	struct move_source_info *move_source = NULL;
+
+	bool success = false;
+	const char *error = NULL;
+
+	scene = obs_get_scene_by_name(scene_name);
 	if (!scene) {
-		obs_data_set_bool(response_data, "success", false);
-		obs_data_set_string(response_data, "error", "Scene not found");
-		return;
+		error = "Scene not found";
+		goto cleanup;
 	}
 
-	obs_sceneitem_t *scene_item = obs_scene_find_source(scene, source_name);
+	scene_item = obs_scene_find_source(scene, source_name);
 	if (!scene_item) {
-		obs_data_set_bool(response_data, "success", false);
-		obs_data_set_string(response_data, "error", "Scene item not found");
-		return;
+		error = "Scene item not found";
+		goto cleanup;
 	}
 
 	// Look for the source in the list of registered sources
-	struct move_source_info *move_source = NULL;
 	for (size_t idx = 0; idx < websocket_registered_sources.num; idx++) {
 		struct move_source_info *move_source_tmp = websocket_registered_sources.array[idx];
 		if (move_source_tmp->scene_item == scene_item) {
@@ -1380,28 +1385,24 @@ void move_source_websocket_request_cb(obs_data_t *request_data, obs_data_t *resp
 	}
 
 	if (!move_source) {
-		obs_data_set_bool(response_data, "success", false);
-		obs_data_set_string(response_data, "error", "Scene item exists but is not registered for websocket events");
-		return;
+		error = "Scene item exists but is not registered for websocket events";
+		goto cleanup;
 	}
 
 	if (move_source->move_filter.moving) {
-		obs_data_set_bool(response_data, "success", false);
-		obs_data_set_string(response_data, "error", "Scene item is still moving");
-		return;
+		error = "Scene item is still moving";
+		goto cleanup;
 	}
 
 	if (!transform_text || !strlen(transform_text)) {
-		obs_data_set_bool(response_data, "success", false);
-		obs_data_set_string(response_data, "error", "Missing 'transformText' string in request data");
-		return;
+		error = "Missing 'transformText' string in request data";
+		goto cleanup;
 	}
 
-	obs_data_t *settings = obs_source_get_settings(move_source->move_filter.source);
+	settings = obs_source_get_settings(move_source->move_filter.source);
 	if (!settings) {
-		obs_data_set_bool(response_data, "success", false);
-		obs_data_set_string(response_data, "error", "Failed to get filter settings");
-		return;
+		error = "Failed to get filter settings";
+		goto cleanup;
 	}
 
 	// Apply the settings
@@ -1411,9 +1412,17 @@ void move_source_websocket_request_cb(obs_data_t *request_data, obs_data_t *resp
 	// Trigger the start event
 	move_source_start(move_source);
 
-	obs_data_release(settings);
-	obs_scene_release(scene);
-	obs_data_set_bool(response_data, "success", true);
+	success = true;
+
+cleanup:
+	if (settings)
+		obs_data_release(settings);
+	if (scene)
+		obs_scene_release(scene);
+
+	obs_data_set_bool(response_data, "success", success);
+	if (!success && error)
+		obs_data_set_string(response_data, "error", error);
 }
 
 struct obs_source_info move_source_filter = {
