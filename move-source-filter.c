@@ -1385,6 +1385,12 @@ void move_source_websocket_request_cb(obs_data_t *request_data, obs_data_t *resp
 		return;
 	}
 
+	if (move_source->move_filter.moving) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Scene item is still moving");
+		return;
+	}
+
 	if (!transform_text || !strlen(transform_text)) {
 		obs_data_set_bool(response_data, "success", false);
 		obs_data_set_string(response_data, "error", "Missing 'transformText' string in request data");
